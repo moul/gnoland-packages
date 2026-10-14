@@ -29,7 +29,7 @@ var (
 func reset() {
 	games, active, stats = avl.Tree{}, avl.Tree{}, avl.Tree{}
 	nextID, fee, feesCollected = 0, 100_000, 0
-	topWins, topGnot = nil, nil
+	topWins, topGnot = ranking{}, ranking{}
 	pendingOwner = ""
 	owner = ownable.NewWithAddress(admin)
 	testSession = false
@@ -633,19 +633,21 @@ func TestSessionKeysCannotAccept(cur realm, t *testing.T) {
 }
 
 func TestBump(t *testing.T) {
-	var b []leader
+	var b ranking
 	for i := 0; i < 12; i++ {
-		b = bump(b, testutils.TestAddress(strconv.Itoa(i)), int64(i))
+		b.bump(testutils.TestAddress(strconv.Itoa(i)), int64(i))
 	}
-	uassert.Equal(t, topN, len(b))
-	uassert.Equal(t, int64(11), b[0].Score)
-	uassert.Equal(t, int64(2), b[9].Score)
-	b = bump(b, testutils.TestAddress("5"), 20) // already listed: moves up, not duplicated
-	uassert.Equal(t, topN, len(b))
-	uassert.Equal(t, testutils.TestAddress("5"), b[0].Addr)
-	b = bump(b, testutils.TestAddress("late"), 11) // ties keep the earlier holder first
-	uassert.Equal(t, testutils.TestAddress("11"), b[1].Addr)
-	uassert.Equal(t, testutils.TestAddress("late"), b[2].Addr)
+	uassert.Equal(t, topN, len(b.Addrs))
+	uassert.Equal(t, topN, len(b.Scores))
+	uassert.Equal(t, int64(11), b.Scores[0])
+	uassert.Equal(t, int64(2), b.Scores[9])
+	b.bump(testutils.TestAddress("5"), 20) // already listed: moves up, not duplicated
+	uassert.Equal(t, topN, len(b.Addrs))
+	uassert.Equal(t, testutils.TestAddress("5"), b.Addrs[0])
+	uassert.Equal(t, int64(20), b.Scores[0])
+	b.bump(testutils.TestAddress("late"), 11) // ties keep the earlier holder first
+	uassert.Equal(t, testutils.TestAddress("11"), b.Addrs[1])
+	uassert.Equal(t, testutils.TestAddress("late"), b.Addrs[2])
 }
 
 func TestRenew(cur realm, t *testing.T) {

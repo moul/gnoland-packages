@@ -129,15 +129,15 @@ func LeadersJSON() string {
 	return b.String()
 }
 
-func writeLeaders(b *strings.Builder, board []leader) {
+func writeLeaders(b *strings.Builder, r ranking) {
 	b.WriteString("[")
-	for i, l := range board {
+	for i, a := range r.Addrs {
 		if i > 0 {
 			b.WriteString(",")
 		}
 		b.WriteString(`{"addr":`)
-		b.WriteString(strconv.Quote(l.Addr.String()))
-		writeNum(b, "score", l.Score)
+		b.WriteString(strconv.Quote(a.String()))
+		writeNum(b, "score", r.Scores[i])
 		b.WriteString("}")
 	}
 	b.WriteString("]")

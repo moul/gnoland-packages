@@ -97,7 +97,7 @@ type Stats struct {
 var (
 	games         avl.Tree // key(id) -> *Game
 	active        avl.Tree // key(id) -> *Game, only Open and Playing
-	stats         avl.Tree // address -> *Stats
+	stats         avl.Tree // address -> Stats (a value: a pointer would be one more stored object)
 	nextID        int
 	fee           int64 = 100_000 // ugnot per decisive game
 	feesCollected int64
@@ -486,9 +486,12 @@ func settleWin(cur realm, g *Game, winner address) {
 	w.Games++
 	w.Wins++
 	w.GnotWon += g.Stake - g.Fee
-	topWins = bump(topWins, winner, int64(w.Wins))
-	topGnot = bump(topGnot, winner, w.GnotWon)
-	statsOf(loser).Games++
+	stats.Set(winner.String(), w)
+	topWins.bump(winner, int64(w.Wins))
+	topGnot.bump(winner, w.GnotWon)
+	l := statsOf(loser)
+	l.Games++
+	stats.Set(loser.String(), l)
 	send(cur, winner, pot-g.Fee)
 }
 
@@ -498,6 +501,7 @@ func settleDraw(cur realm, g *Game) {
 		s := statsOf(p)
 		s.Games++
 		s.Draws++
+		stats.Set(p.String(), s)
 		send(cur, p, g.Stake)
 	}
 }
@@ -508,40 +512,45 @@ func settleVoid(cur realm, g *Game) {
 	send(cur, g.Acceptor, g.Stake)
 }
 
-// leader is one leaderboard row. The boards are kept at settlement so Render
-// never walks every player's stats.
-type leader struct {
-	Addr  address
-	Score int64
+// ranking is a leaderboard, highest first, at most topN: Addrs[i] has
+// Scores[i]. Kept at settlement so Render never walks every player's stats.
+// Two slices rather than a slice of rows: each row struct would be one more
+// stored object.
+type ranking struct {
+	Addrs  []address
+	Scores []int64
 }
 
-var topWins, topGnot []leader // highest first, at most topN
+var topWins, topGnot ranking
 
 const topN = 10
 
-// bump moves addr to its new score in board. Scores only grow, so a player
-// already listed can only move up; ties keep the earlier holder first.
-func bump(board []leader, addr address, score int64) []leader {
-	for i, l := range board {
-		if l.Addr == addr {
-			board = append(board[:i], board[i+1:]...)
+// bump moves addr to its new score. Scores only grow, so a player already
+// listed can only move up; ties keep the earlier holder first.
+func (r *ranking) bump(addr address, score int64) {
+	for i, a := range r.Addrs {
+		if a == addr {
+			r.Addrs = append(r.Addrs[:i], r.Addrs[i+1:]...)
+			r.Scores = append(r.Scores[:i], r.Scores[i+1:]...)
 			break
 		}
 	}
-	i := len(board)
-	for i > 0 && board[i-1].Score < score {
+	i := len(r.Scores)
+	for i > 0 && r.Scores[i-1] < score {
 		i--
 	}
 	if i >= topN {
-		return board
+		return
 	}
-	board = append(board, leader{})
-	copy(board[i+1:], board[i:])
-	board[i] = leader{addr, score}
-	if len(board) > topN {
-		board = board[:topN]
+	r.Addrs = append(r.Addrs, "")
+	copy(r.Addrs[i+1:], r.Addrs[i:])
+	r.Addrs[i] = addr
+	r.Scores = append(r.Scores, 0)
+	copy(r.Scores[i+1:], r.Scores[i:])
+	r.Scores[i] = score
+	if len(r.Addrs) > topN {
+		r.Addrs, r.Scores = r.Addrs[:topN], r.Scores[:topN]
 	}
-	return board
 }
 
 func finish(g *Game, s Status) {
@@ -567,13 +576,13 @@ func (g *Game) player(turn byte) address {
 func (g *Game) deadline() time.Time { return time.Unix(0, g.LastMove).Add(moveTimeout) }
 func (g *Game) expires() time.Time  { return time.Unix(0, g.ExpiresAt) }
 
-func statsOf(addr address) *Stats {
+// statsOf returns a copy of addr's stats, zero if it has none; write changes
+// back with stats.Set.
+func statsOf(addr address) Stats {
 	if v := stats.Get(addr.String()); v != nil {
-		return v.(*Stats)
+		return v.(Stats)
 	}
-	s := &Stats{}
-	stats.Set(addr.String(), s)
-	return s
+	return Stats{}
 }
 
 // key zero-pads ids so avl iteration order matches creation order.

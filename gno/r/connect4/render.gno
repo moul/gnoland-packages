@@ -359,14 +359,14 @@ func parseGNOT(s string) (int64, bool) {
 }
 
 // leaderboard renders a board kept at settlement (topWins, topGnot).
-func leaderboard(board []leader, format func(int64) string) string {
-	if len(board) == 0 {
+func leaderboard(r ranking, format func(int64) string) string {
+	if len(r.Addrs) == 0 {
 		return "No finished games yet.\n\n"
 	}
 	var b strings.Builder
 	b.WriteString("| # | Player | |\n|---|---|---|\n")
-	for i, r := range board {
-		b.WriteString("| " + strconv.Itoa(i+1) + " | " + r.Addr.String() + " | " + format(r.Score) + " |\n")
+	for i, a := range r.Addrs {
+		b.WriteString("| " + strconv.Itoa(i+1) + " | " + a.String() + " | " + format(r.Scores[i]) + " |\n")
 	}
 	b.WriteString("\n")
 	return b.String()
