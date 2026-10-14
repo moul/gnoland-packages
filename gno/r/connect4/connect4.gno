@@ -594,8 +594,14 @@ func key(id int) string {
 	return s
 }
 
+// get looks in active first: it holds only open and running games, so it stays
+// small while games grows forever, and each tree level costs gas to walk.
 func get(id int) *Game {
-	if v := games.Get(key(id)); v != nil {
+	k := key(id)
+	if v := active.Get(k); v != nil {
+		return v.(*Game)
+	}
+	if v := games.Get(k); v != nil {
 		return v.(*Game)
 	}
 	return nil
