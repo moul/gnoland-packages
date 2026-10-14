@@ -10,7 +10,9 @@
 // grind for an outcome, and once its secret is revealed nobody can change it;
 // the only way out is to not reveal, which forfeits. Watching a pending Accept
 // tells the creator nothing either, so it cannot cancel unfavourable games.
-// Each address may use a commitment once: a reused secret is already public.
+// A revealed secret is public: reusing one hands the other side the draw, so
+// clients must generate a fresh secret for every game. The realm does not
+// track used commitments, as that costs every game storage forever.
 //
 // Calls signed by an account session key (Quick play) may only Play, Reveal,
 // RevealSeed, ClaimTimeout and Cancel: a stolen session key must not resign
@@ -68,7 +70,7 @@ type Game struct {
 	Acceptor  address
 	Stake     int64 // ugnot, per player
 	Fee       int64 // ugnot house fee, fixed at offer time
-	ExpiresAt time.Time
+	ExpiresAt int64 // unix nanoseconds: a time.Time field is a separate stored object
 	// Commitment is the lowercase hex sha256 of the creator's passphrase;
 	// SeedCommitment that of the acceptor's seed, given with Accept.
 	Commitment     string
@@ -82,7 +84,7 @@ type Game struct {
 	Moves    int
 	LastCol  int // column and row of the last piece dropped, valid if Moves > 0
 	LastRow  int
-	LastMove time.Time
+	LastMove int64 // unix nanoseconds
 	Status   Status
 	Winner   address
 }
@@ -101,7 +103,6 @@ var (
 	feesCollected int64
 	owner         *ownable.Ownable // the deployer; nil (no owner) if deployed some other way
 	pendingOwner  address          // set by TransferOwnership, made owner by AcceptOwnership
-	used          avl.Tree         // address + ":" + commitment -> true, both kinds
 	// testSession makes tests see every call as session-signed (no test hook sets one).
 	testSession bool
 )
@@ -131,7 +132,6 @@ func Offer(cur realm, opponent address, validFor int, commitment string, maxFee 
 	if fee > maxFee {
 		panic("the house fee is " + gnot(fee) + ", above your maximum of " + gnot(maxFee))
 	}
-	useCommitment(caller, commitment)
 	nextID++
 	g := &Game{
 		ID:        nextID,
@@ -139,7 +139,7 @@ func Offer(cur realm, opponent address, validFor int, commitment string, maxFee 
 		Opponent:  opponent,
 		Stake:     stake,
 		Fee:       fee,
-		ExpiresAt: time.Now().Add(time.Duration(validFor) * time.Minute),
+		ExpiresAt: time.Now().Add(time.Duration(validFor) * time.Minute).UnixNano(),
 
 		Commitment: commitment,
 	}
@@ -183,7 +183,7 @@ func Accept(cur realm, id int, seedCommitment string) {
 	if g.Status != Open {
 		panic("game is not open")
 	}
-	if !time.Now().Before(g.ExpiresAt) {
+	if !time.Now().Before(g.expires()) {
 		panic("offer expired")
 	}
 	if caller == g.Creator {
@@ -198,11 +198,10 @@ func Accept(cur realm, id int, seedCommitment string) {
 	if !isHexSHA256(seedCommitment) {
 		panic("seedCommitment must be 64 lowercase hex chars (sha256 of your seed)")
 	}
-	useCommitment(caller, seedCommitment)
 	g.Acceptor = caller
 	g.SeedCommitment = seedCommitment
 	g.Status = Playing
-	g.LastMove = time.Now() // Turn stays 0 until Reveal
+	g.LastMove = time.Now().UnixNano() // Turn stays 0 until Reveal
 }
 
 // Reveal discloses the creator's passphrase. It must come within 90s of
@@ -227,7 +226,7 @@ func Reveal(cur realm, id int, passphrase string) {
 	}
 	g.Passphrase = passphrase
 	g.Revealed = true
-	g.LastMove = time.Now()
+	g.LastMove = time.Now().UnixNano()
 }
 
 // RevealSeed discloses the acceptor's seed, which with the creator's
@@ -248,7 +247,7 @@ func RevealSeed(cur realm, id int, seed string) {
 		panic("seed does not match the commitment")
 	}
 	g.Turn = firstMover(g.Passphrase, seed, g)
-	g.LastMove = time.Now()
+	g.LastMove = time.Now().UnixNano()
 }
 
 // firstMover draws 1 (creator) or 2 (acceptor) from both secrets.
@@ -296,7 +295,7 @@ func Play(cur realm, id, column, move int) {
 		settleDraw(cur, g)
 	default:
 		g.Turn = 3 - g.Turn
-		g.LastMove = time.Now()
+		g.LastMove = time.Now().UnixNano()
 	}
 }
 
@@ -351,11 +350,31 @@ func Cancel(cur realm, id int) {
 	if g.Status != Open {
 		panic("game is not open")
 	}
-	if cur.Previous().Address() != g.Creator && time.Now().Before(g.ExpiresAt) {
+	if cur.Previous().Address() != g.Creator && time.Now().Before(g.expires()) {
 		panic("only the creator can cancel an unexpired offer")
 	}
 	finish(g, Cancelled)
 	send(cur, g.Creator, g.Stake)
+}
+
+// Renew reopens the caller's open offer for validFor minutes from now,
+// expired or not. It keeps the stake, fee, opponent and commitment (still
+// secret, as nobody accepted), so it costs no new storage where a fresh
+// Offer would.
+func Renew(cur realm, id, validFor int) {
+	noCoins()
+	noSession("Renew")
+	g := mustGet(id)
+	if g.Status != Open {
+		panic("game is not open")
+	}
+	if cur.Previous().Address() != g.Creator {
+		panic("only the creator can renew an offer")
+	}
+	if validFor < 1 || validFor > maxOfferTTL {
+		panic("validFor must be between 1 and 60 minutes")
+	}
+	g.ExpiresAt = time.Now().Add(time.Duration(validFor) * time.Minute).UnixNano()
 }
 
 // SetFee changes the flat house fee, in ugnot, for new offers. Games already
@@ -406,17 +425,6 @@ func AcceptOwnership(cur realm) {
 	}
 	owner = ownable.NewWithAddress(caller)
 	pendingOwner = ""
-}
-
-// useCommitment records a commitment for addr, refusing one it already used:
-// a revealed secret is public, so reusing it hands the other side the draw.
-// Keyed by address, so nobody can block another player's commitment.
-func useCommitment(addr address, commitment string) {
-	k := addr.String() + ":" + commitment
-	if used.Has(k) {
-		panic("commitment already used: generate a fresh secret")
-	}
-	used.Set(k, true)
 }
 
 // received returns the ugnot sent with a direct user call. OriginSend only
@@ -556,7 +564,8 @@ func (g *Game) player(turn byte) address {
 	return g.Acceptor
 }
 
-func (g *Game) deadline() time.Time { return g.LastMove.Add(moveTimeout) }
+func (g *Game) deadline() time.Time { return time.Unix(0, g.LastMove).Add(moveTimeout) }
+func (g *Game) expires() time.Time  { return time.Unix(0, g.ExpiresAt) }
 
 func statsOf(addr address) *Stats {
 	if v := stats.Get(addr.String()); v != nil {

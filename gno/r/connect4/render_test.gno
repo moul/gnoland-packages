@@ -37,7 +37,7 @@ func TestGamePageShowsActionsForEveryState(cur realm, t *testing.T) {
 	contains(Render(page), "func=Accept", ".send=10000000ugnot", "func=Cancel", "Open offer")
 
 	g := mustGet(id)
-	g.ExpiresAt = time.Now().Add(-time.Second)
+	g.ExpiresAt = time.Now().Add(-time.Second).UnixNano()
 	out := Render(page)
 	contains(out, "expired", "func=Cancel")
 	uassert.False(t, strings.Contains(out, "func=Accept"))
