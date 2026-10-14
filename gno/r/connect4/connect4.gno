@@ -95,7 +95,7 @@ type Stats struct {
 }
 
 var (
-	games         avl.Tree // key(id) -> *Game
+	games         []*book  // every game ever offered, by id: see store
 	active        avl.Tree // key(id) -> *Game, only Open and Playing
 	stats         avl.Tree // address -> Stats (a value: a pointer would be one more stored object)
 	nextID        int
@@ -143,7 +143,7 @@ func Offer(cur realm, opponent address, validFor int, commitment string, maxFee 
 
 		Commitment: commitment,
 	}
-	games.Set(key(g.ID), g)
+	store(g)
 	active.Set(key(g.ID), g)
 	return g.ID
 }
@@ -594,17 +594,35 @@ func key(id int) string {
 	return s
 }
 
-// get looks in active first: it holds only open and running games, so it stays
-// small while games grows forever, and each tree level costs gas to walk.
+// Games are indexed by id-1 written in base 64: games[a][b][c]. Ids are
+// sequential, so this is a dense array in three levels, and each write
+// rewrites at most three 64-slot arrays however many games exist. An avl tree
+// rewrites a whole root-to-leaf path instead: 10.5M gas for an Offer at 3,000
+// games against 3.3M here at 10,000. games gains one entry per 4,096 games,
+// so writes stay flat for the first 262,144 games and grow slowly after.
+type (
+	page [64]*Game
+	book [64]*page
+)
+
+func store(g *Game) {
+	i := g.ID - 1
+	if i%4096 == 0 {
+		games = append(games, &book{})
+	}
+	b := games[i/4096]
+	if b[i/64%64] == nil {
+		b[i/64%64] = &page{}
+	}
+	b[i/64%64][i%64] = g
+}
+
 func get(id int) *Game {
-	k := key(id)
-	if v := active.Get(k); v != nil {
-		return v.(*Game)
+	if id < 1 || id > nextID {
+		return nil
 	}
-	if v := games.Get(k); v != nil {
-		return v.(*Game)
-	}
-	return nil
+	i := id - 1
+	return games[i/4096][i/64%64][i%64]
 }
 
 func mustGet(id int) *Game {

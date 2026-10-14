@@ -27,7 +27,7 @@ var (
 )
 
 func reset() {
-	games, active, stats = avl.Tree{}, avl.Tree{}, avl.Tree{}
+	games, active, stats = nil, avl.Tree{}, avl.Tree{}
 	nextID, fee, feesCollected = 0, 100_000, 0
 	topWins, topGnot = ranking{}, ranking{}
 	pendingOwner = ""
@@ -678,4 +678,19 @@ func TestRenew(cur realm, t *testing.T) {
 	testing.SetRealm(testing.NewUserRealm(alice))
 	pay(0)
 	uassert.AbortsContains(t, cur, "game is not open", func() { Renew(cross(cur), id, 10) })
+}
+
+func TestGameIndexCrossesPagesAndBooks(t *testing.T) {
+	reset()
+	for i := 1; i <= 4100; i++ {
+		nextID = i
+		store(&Game{ID: i})
+	}
+	for _, id := range []int{1, 64, 65, 4096, 4097, 4100} {
+		uassert.Equal(t, id, get(id).ID)
+	}
+	uassert.Equal(t, 2, len(games))
+	uassert.True(t, get(0) == nil)
+	uassert.True(t, get(4101) == nil)
+	uassert.True(t, get(-1) == nil)
 }
